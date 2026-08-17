@@ -17,7 +17,7 @@ The GitHub repository contains the source code only. Copilot Studio cannot conne
 | `MCP_SERVER_API_KEY` | A separate secret that Copilot Studio sends to this MCP server. |
 | `MCP_TRANSPORT` | Set to `streamable-http` for Copilot Studio. |
 
-Optional variables include `MCP_PORT` (default `8000`), `MCP_PATH` (default `/mcp`), `MCP_ALLOWED_HOSTS` (comma-separated host allowlist), and `DATA_GOV_ALLOWED_HOSTS` (comma-separated federal API host allowlist).
+Optional variables include `MCP_HOST` (default `127.0.0.1`), `MCP_PORT` (default `8000`), `MCP_PATH` (default `/mcp`), `MCP_ALLOWED_HOSTS` (comma-separated host allowlist), and `DATA_GOV_ALLOWED_HOSTS` (comma-separated federal API host allowlist). Set `MCP_HOST=0.0.0.0` only inside a container behind HTTPS ingress.
 
 Do not use the data.gov key as the MCP server key. Store both as deployment secrets.
 
@@ -79,7 +79,9 @@ Leave `MCP_TRANSPORT` unset for stdio mode. Use `MCP_TRANSPORT=streamable-http` 
 
 - Only HTTPS federal hosts are allowed by default for downstream requests.
 - Private, loopback, link-local, multicast, and reserved downstream addresses are rejected.
+- Responses are limited to 5 MB to protect server and agent memory.
 - The Copilot Studio-facing endpoint requires `X-MCP-API-Key`.
+- Caller-supplied `api_key` query parameters are rejected; only the server-held key is used.
 - The data.gov API key is sent only from the server to the downstream API and is never returned as a tool result.
 - Apply Power Platform data policies to control external connector access in Copilot Studio.
 

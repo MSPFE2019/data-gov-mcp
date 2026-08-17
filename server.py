@@ -7,7 +7,7 @@ import hmac
 import json
 import os
 import socket
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
@@ -20,10 +20,20 @@ import uvicorn
 
 mcp = FastMCP("data-gov")
 DEFAULT_TIMEOUT_SECONDS = 30
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 
 
 def _api_key() -> str:
     return os.environ.get("DATA_GOV_API_KEY", "DEMO_KEY")
+
+
+def _require_api_key() -> str:
+    key = os.environ.get("DATA_GOV_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError(
+            "DATA_GOV_API_KEY must be set for streamable HTTP deployments."
+        )
+    return key
 
 
 def _configured_hosts() -> set[str]:
@@ -84,10 +94,14 @@ def _request_json(
     include_api_key: bool = True,
 ) -> Any:
     query = parse_qs(urlparse(endpoint_url).query, keep_blank_values=True)
+    if "api_key" in query:
+        raise ValueError("Do not include api_key in endpoint_url.")
     for key, value in (params or {}).items():
+        if key.lower() == "api_key":
+            raise ValueError("api_key must not be supplied by the caller.")
         if value is not None:
             query[key] = [str(value)]
-    if include_api_key and "api_key" not in query:
+    if include_api_key:
         query["api_key"] = [_api_key()]
 
     parsed = urlparse(endpoint_url)
@@ -97,8 +111,11 @@ def _request_json(
         headers["X-Api-Key"] = _api_key()
 
     try:
-        with urlopen(Request(request_url, headers=headers), timeout=timeout) as response:
-            raw = response.read()
+        with urlopen(
+            Request(request_url, headers=headers),
+            timeout=timeout,
+        ) as response:
+            raw = _read_limited(response)
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:2000]
         raise RuntimeError(f"data.gov API returned HTTP {exc.code}: {detail}") from exc
@@ -109,6 +126,15 @@ def _request_json(
         return json.loads(raw)
     except json.JSONDecodeError:
         return {"text": raw.decode("utf-8", errors="replace")[:10000]}
+
+
+def _read_limited(response: BinaryIO) -> bytes:
+    raw = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise RuntimeError(
+            f"API response exceeds the {MAX_RESPONSE_BYTES} byte limit."
+        )
+    return raw
 
 
 @mcp.tool()
@@ -135,8 +161,9 @@ def get_rate_limit_info(endpoint_url: str) -> dict[str, Any]:
     _validate_endpoint(endpoint_url)
     parsed = urlparse(endpoint_url)
     query = parse_qs(parsed.query, keep_blank_values=True)
-    if "api_key" not in query:
-        query["api_key"] = [_api_key()]
+    if "api_key" in query:
+        raise ValueError("Do not include api_key in endpoint_url.")
+    query["api_key"] = [_api_key()]
     request_url = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
     request = Request(
         request_url,
@@ -148,7 +175,7 @@ def get_rate_limit_info(endpoint_url: str) -> dict[str, Any]:
     )
     try:
         with urlopen(request, timeout=DEFAULT_TIMEOUT_SECONDS) as response:
-            body = response.read()
+            body = _read_limited(response)
             headers = {
                 "limit": response.headers.get("X-RateLimit-Limit"),
                 "remaining": response.headers.get("X-RateLimit-Remaining"),
@@ -191,7 +218,8 @@ def _run_streamable_http() -> None:
             "MCP_SERVER_API_KEY must be set when MCP_TRANSPORT=streamable-http."
         )
 
-    mcp.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
+    _require_api_key()
+    mcp.settings.host = os.environ.get("MCP_HOST", "127.0.0.1")
     mcp.settings.port = int(os.environ.get("MCP_PORT", "8000"))
     mcp.settings.streamable_http_path = os.environ.get("MCP_PATH", "/mcp")
     configured_hosts = os.environ.get("MCP_ALLOWED_HOSTS", "")
