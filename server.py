@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import hmac
 import json
 import os
 import socket
@@ -12,6 +13,9 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from mcp.server.fastmcp import FastMCP
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+import uvicorn
 
 
 mcp = FastMCP("data-gov")
@@ -164,5 +168,47 @@ def get_rate_limit_info(endpoint_url: str) -> dict[str, Any]:
     return {"rate_limit": headers, "response": payload}
 
 
+class ApiKeyMiddleware(BaseHTTPMiddleware):
+    """Protect the public MCP endpoint without exposing the data.gov key."""
+
+    async def dispatch(self, request, call_next):
+        expected = os.environ.get("MCP_SERVER_API_KEY", "")
+        endpoint_path = os.environ.get("MCP_PATH", "/mcp")
+        if request.url.path == endpoint_path:
+            supplied = request.headers.get("X-MCP-API-Key", "")
+            if not expected or not hmac.compare_digest(supplied, expected):
+                return JSONResponse(
+                    {"error": "A valid X-MCP-API-Key header is required."},
+                    status_code=401,
+                )
+        return await call_next(request)
+
+
+def _run_streamable_http() -> None:
+    server_key = os.environ.get("MCP_SERVER_API_KEY", "")
+    if not server_key:
+        raise RuntimeError(
+            "MCP_SERVER_API_KEY must be set when MCP_TRANSPORT=streamable-http."
+        )
+
+    mcp.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
+    mcp.settings.port = int(os.environ.get("MCP_PORT", "8000"))
+    mcp.settings.streamable_http_path = os.environ.get("MCP_PATH", "/mcp")
+    configured_hosts = os.environ.get("MCP_ALLOWED_HOSTS", "")
+    if configured_hosts:
+        mcp.settings.transport_security.allowed_hosts = [
+            host.strip() for host in configured_hosts.split(",") if host.strip()
+        ]
+    app = mcp.streamable_http_app()
+    app.add_middleware(ApiKeyMiddleware)
+    uvicorn.run(app, host=mcp.settings.host, port=mcp.settings.port)
+
+
 if __name__ == "__main__":
-    mcp.run()
+    transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
+    if transport == "streamable-http":
+        _run_streamable_http()
+    elif transport == "stdio":
+        mcp.run()
+    else:
+        raise ValueError("MCP_TRANSPORT must be 'stdio' or 'streamable-http'.")
